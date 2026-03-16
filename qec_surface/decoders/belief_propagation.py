@@ -11,8 +11,7 @@ stabilizers), which violates the tree-like assumption BP relies on.
 
 The standard fix is OSD (Ordered Statistics Decoding) as a post-processing
 step after BP: BP+OSD achieves near-MWPM performance but at higher
-computational cost. This is the decoder used in e.g. LDPC code proposals
-(Panteleev & Kalachev, Leverrier et al.) where MWPM doesn't apply.
+computational cost.
 
 For surface codes specifically:
 - Pure BP:     threshold ~0.3-0.5% (well below MWPM's ~1%)
@@ -32,22 +31,9 @@ from .base import BaseDecoder
 def _dem_to_parity_check_matrices(dem: stim.DetectorErrorModel):
     """
     Convert a stim DetectorErrorModel to parity check matrices H and observables.
-
-    The DEM describes a list of error mechanisms, each with:
-    - a probability
-    - a set of detectors it flips
-    - a set of logical observables it flips
-
-    We build:
-      H:    (n_detectors x n_errors) binary matrix — which errors flip which detectors
-      obs:  (n_observables x n_errors) binary matrix — which errors flip which observables
-      probs: (n_errors,) float array — error probabilities
-
-    This is the standard parity check matrix formulation for LDPC decoding.
     """
     n_detectors = dem.num_detectors
     n_observables = dem.num_observables
-
     error_mechanisms = []
 
     def _process_instruction(instruction):
@@ -90,46 +76,39 @@ class BeliefPropagationDecoder(BaseDecoder):
     """
     Belief Propagation decoder (pure BP, no OSD post-processing).
 
-    Intentionally does NOT use OSD so the BP limitations on surface codes
-    are visible in the threshold plot. This makes the comparison with MWPM
-    physically meaningful: you can see exactly where BP breaks down.
-
-    For production use on surface codes, use BPOSDDecoder below.
+    Навмисно без OSD щоб деградація BP на surface code була видна
+    на threshold plot. Це робить порівняння з MWPM фізично змістовним.
 
     Requires: pip install ldpc
     """
 
     def _build(self, dem: stim.DetectorErrorModel) -> None:
         try:
-            from ldpc import bp_decoder
+            from ldpc import BpDecoder
         except ImportError:
             raise ImportError(
-                "ldpc library not found. Install with: pip install ldpc\n"
-                "GitHub: https://github.com/quantumgizmos/ldpc"
+                "ldpc library not found. Install with: pip install ldpc"
             )
 
         self._H, self._obs_matrix, self._probs = _dem_to_parity_check_matrices(dem)
         self._n_observables = dem.num_observables
 
-        self._decoder = bp_decoder(
+        self._decoder = BpDecoder(
             self._H,
             error_rate=float(np.mean(self._probs)),
             channel_probs=self._probs,
-            max_iter=self._H.shape[1],   # max iterations = n_errors (generous)
-            bp_method="product_sum",      # standard sum-product BP
-            ms_scaling_factor=0,          # not used for product_sum
+            max_iter=self._H.shape[1],
+            bp_method="product_sum",
         )
 
     def decode_batch(self, detectors: np.ndarray) -> np.ndarray:
         n_samples = detectors.shape[0]
-        n_obs = self._n_observables
-        predicted = np.zeros((n_samples, n_obs), dtype=bool)
+        predicted = np.zeros((n_samples, self._n_observables), dtype=bool)
 
         for i in range(n_samples):
             syndrome = detectors[i].astype(np.uint8)
             correction = self._decoder.decode(syndrome)
-            # Predicted observable = parity of correction on observable matrix
-            for o in range(n_obs):
+            for o in range(self._n_observables):
                 predicted[i, o] = bool(np.dot(self._obs_matrix[o], correction) % 2)
 
         return predicted
@@ -143,12 +122,12 @@ class BPOSDDecoder(BaseDecoder):
     """
     Belief Propagation + Ordered Statistics Decoding.
 
-    OSD post-processing rescues BP when it fails to converge on cycles.
-    Near-MWPM threshold performance at higher computational cost.
+    OSD рятує BP коли він не збігається через цикли.
+    Near-MWPM threshold при вищій обчислювальній вартості.
 
-    osd_order controls the OSD search depth:
-    - order=0: fast, slight threshold penalty
-    - order=2: near-MWPM performance, ~10x slower than BP alone
+    osd_order:
+    - order=0: швидко, невелика втрата threshold
+    - order=2: близько до MWPM, ~10x повільніше ніж чистий BP
 
     Reference: Panteleev & Kalachev, arXiv:2103.06309
     """
@@ -159,32 +138,33 @@ class BPOSDDecoder(BaseDecoder):
 
     def _build(self, dem: stim.DetectorErrorModel) -> None:
         try:
-            from ldpc import bposd_decoder
+            from ldpc import BpOsdDecoder
         except ImportError:
-            raise ImportError("ldpc library not found. Install with: pip install ldpc")
+            raise ImportError(
+                "ldpc library not found. Install with: pip install ldpc"
+            )
 
         self._H, self._obs_matrix, self._probs = _dem_to_parity_check_matrices(dem)
         self._n_observables = dem.num_observables
 
-        self._decoder = bposd_decoder(
+        self._decoder = BpOsdDecoder(
             self._H,
             error_rate=float(np.mean(self._probs)),
             channel_probs=self._probs,
             max_iter=self._H.shape[1],
             bp_method="product_sum",
-            osd_method="osd_cs",          # column sweep OSD
+            osd_method="osd_cs",
             osd_order=self._osd_order,
         )
 
     def decode_batch(self, detectors: np.ndarray) -> np.ndarray:
         n_samples = detectors.shape[0]
-        n_obs = self._n_observables
-        predicted = np.zeros((n_samples, n_obs), dtype=bool)
+        predicted = np.zeros((n_samples, self._n_observables), dtype=bool)
 
         for i in range(n_samples):
             syndrome = detectors[i].astype(np.uint8)
             correction = self._decoder.decode(syndrome)
-            for o in range(n_obs):
+            for o in range(self._n_observables):
                 predicted[i, o] = bool(np.dot(self._obs_matrix[o], correction) % 2)
 
         return predicted
