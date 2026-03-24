@@ -1,25 +1,28 @@
 """
-Belief Propagation + OSD decoder via the ldpc library.
-
-BP is the standard decoder for LDPC codes (e.g. used in classical 5G).
-For surface codes it has a fundamental limitation: short cycles in the
-Tanner graph cause BP to fail to converge or converge to wrong solutions.
-
-This is not a bug — it's a known theoretical problem.
-Surface codes have many 4-cycles (each data qubit touches 2 X and 2 Z
-stabilizers), which violates the tree-like assumption BP relies on.
-
-The standard fix is OSD (Ordered Statistics Decoding) as a post-processing
-step after BP: BP+OSD achieves near-MWPM performance but at higher
-computational cost.
-
-For surface codes specifically:
-- Pure BP:     threshold ~0.3-0.5% (well below MWPM's ~1%)
-- BP+OSD:      threshold ~0.9-1.0% (close to MWPM)
-
-Reference:
-    Panteleev & Kalachev, arXiv:2103.06309 (BP+OSD for quantum LDPC)
-    Roffe et al., arXiv:2005.07016 (ldpc library)
+Belief Propagation and BP+OSD decoders via the ldpc library.
+ 
+Belief Propagation (BP) is the standard decoder for classical LDPC codes,
+widely used in e.g. 5G communications. For quantum surface codes it has a
+fundamental limitation: the Tanner graph contains many short 4-cycles (each
+data qubit participates in 2 X-type and 2 Z-type stabilizers), which violates
+the locally tree-like assumption that BP requires to converge correctly.
+ 
+This is a known theoretical problem, not an implementation bug. The consequence
+is that BP logical error rate *increases* with code distance on surface codes —
+the opposite of correct QEC behavior.
+ 
+Ordered Statistics Decoding (OSD) is a post-processing step that rescues BP
+when it fails on cycles. After BP, OSD performs Gaussian elimination on the
+most reliable bits and searches for the most likely correction. BP+OSD achieves
+near-MWPM threshold performance at the cost of higher computational overhead.
+ 
+Expected thresholds on rotated surface code (uniform depolarizing noise):
+    BP alone:   ~0.3–0.5%  (well below MWPM)
+    BP+OSD:     ~0.9–1.0%  (close to MWPM)
+ 
+References:
+    Panteleev & Kalachev, arXiv:2103.06309  (BP+OSD for quantum LDPC codes)
+    Roffe et al., arXiv:2005.07016          (ldpc library)
 """
 
 import numpy as np
@@ -30,7 +33,16 @@ from .base import BaseDecoder
 
 def _dem_to_parity_check_matrices(dem: stim.DetectorErrorModel):
     """
-    Convert a stim DetectorErrorModel to parity check matrices H and observables.
+    Convert a stim DetectorErrorModel to parity check matrices.
+ 
+    Each error mechanism in the DEM defines a column in the matrices below.
+ 
+    Returns:
+        H:          (n_detectors, n_errors) uint8 array.
+                    H[i, j] = 1 if error mechanism j flips detector i.
+        obs_matrix: (n_observables, n_errors) uint8 array.
+                    obs_matrix[k, j] = 1 if error mechanism j flips observable k.
+        probs:      (n_errors,) float array of error probabilities.
     """
     n_detectors = dem.num_detectors
     n_observables = dem.num_observables
@@ -74,11 +86,15 @@ def _dem_to_parity_check_matrices(dem: stim.DetectorErrorModel):
 
 class BeliefPropagationDecoder(BaseDecoder):
     """
-    Belief Propagation decoder (pure BP, no OSD post-processing).
-
-    Навмисно без OSD щоб деградація BP на surface code була видна
-    на threshold plot. Це робить порівняння з MWPM фізично змістовним.
-
+    Pure Belief Propagation decoder without OSD post-processing.
+ 
+    Intentionally omits OSD so that BP's degradation on surface codes is
+    visible in threshold plots. At large code distances, this decoder performs
+    worse than random guessing — a direct demonstration of the short-cycle
+    problem in the surface code Tanner graph.
+ 
+    For near-MWPM performance, use BPOSDDecoder instead.
+ 
     Requires: pip install ldpc
     """
 
@@ -120,15 +136,21 @@ class BeliefPropagationDecoder(BaseDecoder):
 
 class BPOSDDecoder(BaseDecoder):
     """
-    Belief Propagation + Ordered Statistics Decoding.
-
-    OSD рятує BP коли він не збігається через цикли.
-    Near-MWPM threshold при вищій обчислювальній вартості.
-
-    osd_order:
-    - order=0: швидко, невелика втрата threshold
-    - order=2: близько до MWPM, ~10x повільніше ніж чистий BP
-
+    Belief Propagation + Ordered Statistics Decoding decoder.
+ 
+    After BP converges (or fails to converge), OSD post-processing applies
+    Gaussian elimination on the most reliable bit positions and performs a
+    column-sweep search (osd_cs) to find the most likely correction. This
+    rescues the cases where BP is misled by short cycles.
+ 
+    Args:
+        dem:       Detector error model from stim.
+        osd_order: Search depth for OSD column sweep.
+                   order=0 is fast with a small threshold penalty.
+                   order=2 approaches MWPM performance (~10x slower than BP alone).
+ 
+    Requires: pip install ldpc
+ 
     Reference: Panteleev & Kalachev, arXiv:2103.06309
     """
 

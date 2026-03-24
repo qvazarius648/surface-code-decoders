@@ -1,10 +1,16 @@
 """
-Logical error rate estimation with proper statistical treatment.
-
-Key design decisions:
-- Error bars via Wilson score interval (better than naive binomial for small counts)
-- Results returned as structured dataclass, not raw floats
-- Decoder receives DEM once at construction, not per sample (performance)
+Logical error rate estimation with statistical confidence intervals.
+ 
+Design decisions:
+    - Confidence intervals via Wilson score interval rather than the naive
+      binomial approximation p ± sqrt(p(1-p)/n), which can produce negative
+      bounds and is unreliable for small error counts.
+    - Results are returned as a structured DecoderResult dataclass rather than
+      raw floats, so callers always have access to counts alongside rates.
+    - The DEM is built once per experiment and shared between the decoder
+      constructor and the sampler, avoiding redundant computation.
+    - sweep_noise_levels and compare_decoders return pandas DataFrames for
+      straightforward plotting and analysis downstream.
 """
 
 from dataclasses import dataclass
@@ -21,11 +27,20 @@ from ..decoders.base import BaseDecoder
 @dataclass
 class DecoderResult:
     """
-    Result of a single decoder experiment.
-
-    Includes point estimate and confidence interval for the logical error rate.
-    Uses Wilson score interval which is well-behaved even for small error counts
-    (unlike the naive p ± sqrt(p(1-p)/n) which can give negative bounds).
+    Result of a single decoder experiment at one (distance, noise_level) point.
+ 
+    Stores raw counts rather than just the rate so that confidence intervals
+    can be computed correctly. The Wilson score interval is used throughout
+    because it remains well-behaved when error counts are small or zero.
+ 
+    Attributes:
+        distance:          Code distance d.
+        rounds:            Number of syndrome extraction rounds.
+        noise_level:       Depolarizing probability p (primary sweep parameter).
+        noise_description: Full noise model description string.
+        decoder_name:      Human-readable decoder identifier.
+        n_samples:         Total number of Monte Carlo shots.
+        n_errors:          Number of shots where a logical error occurred.
     """
     distance: int
     rounds: int
@@ -42,8 +57,16 @@ class DecoderResult:
     @property
     def wilson_interval(self) -> tuple[float, float]:
         """
-        95% Wilson score confidence interval.
-        Reference: Wilson (1927), also see Agresti & Coull (1998).
+        95% Wilson score confidence interval for the logical error rate.
+ 
+        Preferred over the normal approximation interval because it does not
+        produce negative lower bounds and is accurate for small counts.
+ 
+        References:
+            Wilson (1927). Probable inference, the law of succession, and
+                statistical inference. JASA 22(158): 209-212.
+            Agresti & Coull (1998). Approximate is better than exact for
+                interval estimation of binomial proportions. TAS 52(2).
         """
         n, k = self.n_samples, self.n_errors
         z = 1.96  # 95% confidence
@@ -68,15 +91,20 @@ def estimate_logical_error_rate(
     n_samples: int,
 ) -> DecoderResult:
     """
-    Run one experiment: sample syndromes, decode, count logical errors.
-
+    Run one decoder experiment: sample syndromes, decode, count logical errors.
+ 
+    The DEM is constructed once and used both to initialize the decoder and
+    to drive the syndrome sampler. A logical error is counted whenever the
+    decoder's predicted observable flips disagree with the true flips on any
+    observable in a given shot.
+ 
     Args:
-        sc:           SurfaceCodeCircuit to sample from
-        decoder_cls:  Decoder class (not instance) to instantiate
-        n_samples:    Number of Monte Carlo samples
-
+        sc:          SurfaceCodeCircuit defining the code and noise model.
+        decoder_cls: Decoder class to instantiate (not an instance).
+        n_samples:   Number of Monte Carlo shots to sample.
+ 
     Returns:
-        DecoderResult with logical error rate and confidence interval
+        DecoderResult with logical error rate and Wilson confidence interval.
     """
     # Build DEM once — used both for decoder construction and sampling
     dem = sc.detector_error_model(decompose_errors=True)
@@ -121,20 +149,23 @@ def sweep_noise_levels(
     noise_factory=NoiseModel.uniform,
 ) -> pd.DataFrame:
     """
-    Sweep over distances and noise levels, collect results into a DataFrame.
-
+    Sweep over code distances and noise levels for a single decoder.
+ 
     Args:
-        distances:            List of code distances to test
-        noise_levels:         List of noise probabilities to sweep
-        decoder_cls:          Decoder class to use
-        n_samples:            Samples per data point
-        rounds_per_distance:  If None, uses rounds = distance (standard choice)
-        code_type:            Surface code variant
-        noise_factory:        Callable p -> NoiseModel. Default: uniform noise.
-
+        distances:           Code distances to evaluate.
+        noise_levels:        Physical error rates to sweep over.
+        decoder_cls:         Decoder class to use for all experiments.
+        n_samples:           Monte Carlo shots per data point.
+        rounds_per_distance: Syndrome extraction rounds per experiment.
+                             If None, uses rounds = distance, which gives a
+                             balanced space-time decoding problem.
+        code_type:           Surface code variant to generate.
+        noise_factory:       Callable mapping p -> NoiseModel.
+                             Defaults to uniform noise across all channels.
+ 
     Returns:
         DataFrame with columns: distance, rounds, noise_level, noise_description,
-        decoder_name, n_samples, n_errors, logical_error_rate, error_bar
+        decoder_name, n_samples, n_errors, logical_error_rate, error_bar.
     """
     records = []
 
@@ -173,7 +204,24 @@ def compare_decoders(
     noise_factory=NoiseModel.uniform,
 ) -> pd.DataFrame:
     """
-    Run sweep_noise_levels for multiple decoders and combine results.
+    Run sweep_noise_levels for multiple decoders and combine into one DataFrame.
+ 
+    Iterates over decoder_classes in order, runs a full noise sweep for each,
+    and concatenates the results. The decoder_name column distinguishes results
+    from different decoders in the output DataFrame.
+ 
+    Args:
+        distances:           Code distances to evaluate.
+        noise_levels:        Physical error rates to sweep over.
+        decoder_classes:     List of decoder classes to compare.
+        n_samples:           Monte Carlo shots per data point.
+        rounds_per_distance: Syndrome extraction rounds. If None, uses rounds = distance.
+        code_type:           Surface code variant to generate.
+        noise_factory:       Callable mapping p -> NoiseModel.
+ 
+    Returns:
+        DataFrame with the same schema as sweep_noise_levels, with decoder_name
+        column identifying which decoder produced each row.
     """
     all_results = []
 
